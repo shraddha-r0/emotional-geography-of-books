@@ -1,6 +1,6 @@
 # 📚 Emotional Geography of Books
 
-This project explores the **emotional tone of book titles across cultures, genres, and time** using NLP and real-world book data. By analyzing patterns in language, sentiment, and authorship, it aims to uncover how storytelling reflects — and shapes — emotional landscapes around the world.
+This project explores the **emotional tone of book titles across cultures, genres, and time** using NLP and real-world book data. By analyzing patterns in language, sentiment, and authorship, it aims to uncover how storytelling reflects and shapes emotional landscapes around the world.
 
 ## 🌍 Project Goals
 
@@ -16,9 +16,8 @@ This project explores the **emotional tone of book titles across cultures, genre
 
 ## 🧰 Tools and Libraries
 
+Potentially:
 - **Python**, **pandas**, **SpaCy**
 - **VADER** and **transformers** for sentiment analysis
 - **Matplotlib**, **Seaborn**, **Plotly** for visualization
 - **Jupyter Notebooks** in **Visual Studio Code**
-
-## 📁 Repository Structure
