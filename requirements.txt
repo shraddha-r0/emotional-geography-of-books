@@ -1,0 +1,21 @@
+## 🧪 Status
+
+- [x] Project idea defined  
+- [ ] Data collection started  
+- [ ] Sentiment model exploration  
+- [ ] Visualization and story crafting  
+
+## ✨ Next Steps
+
+- ✅ Collect titles + metadata for ~1,000 books across 4+ countries  
+- ⏳ Clean and format metadata (genre, author gender, year)  
+- ⏳ Begin tone comparison using VADER & multilingual sentiment models  
+- ⏳ Publish insights to Medium
+
+---
+
+## 🤝 Contributions
+
+This is an open digital garden. If you’re a book lover, NLP nerd, or cultural analyst — feel free to fork, suggest, or discuss.
+
+---
