@@ -10,14 +10,12 @@ This project explores the **emotional tone of book titles across cultures, genre
 
 ## 📊 Data Sources
 
-- OpenLibrary API (title, author, subject, year)
-- Goodreads datasets via Kaggle (genres, ratings, author gender, etc.)
-- Google Books API or UNESCO Index Translationum for translation metadata
+- Top 200 books for the last 5 years from 2020 onwards from Goodreads
+
 
 ## 🧰 Tools and Libraries
-
-Potentially:
 - **Python**, **pandas**, **SpaCy**
+- **BeautifulSoup** for Web Scraping
 - **VADER** and **transformers** for sentiment analysis
 - **Matplotlib**, **Seaborn**, **Plotly** for visualization
 - **Jupyter Notebooks** in **Visual Studio Code**
