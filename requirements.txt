@@ -1,7 +1,7 @@
 # ## 🧪 Status
 
 # - [x] Project idea defined  
-# - [ ] Data collection started  
+# - [x] Data collection started  
 # - [ ] Sentiment model exploration  
 # - [ ] Visualization and story crafting  
 
