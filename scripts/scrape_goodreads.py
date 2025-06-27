@@ -3,6 +3,18 @@ import pandas as pd
 import time
 from pathlib import Path
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/115.0.0.0 Safari/537.36"
+    )
+}
+MAX_CONCURRENCY = 30
+TIMEOUT = aiohttp.ClientTimeout(total=15)
+nest_asyncio.apply()
+
+
 # 🛠 Setup visible Chrome browser
 def setup_driver():
     chrome_options = Options()
