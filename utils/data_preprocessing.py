@@ -1,10 +1,11 @@
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
+
 from utils.config import RAW_DATA_PATH
 
 def load_all_books(raw_path=RAW_DATA_PATH) -> pd.DataFrame:
-    files = list(raw_path).glob("goodreads_books_*.csv")
+    files = list(raw_path.glob("goodreads_books_*.csv"))
     if not files:
         raise FileNotFoundError("🚫 No Goodreads files found!")
 
@@ -28,3 +29,29 @@ def load_all_books(raw_path=RAW_DATA_PATH) -> pd.DataFrame:
     print(f"📚 Total books loaded: {len(df_all)}")
 
     return df_all
+
+def clean_ratings_count(value):
+    if pd.isna(value):
+        return 0
+    value = value.lower().replace("ratings", "").strip()
+    multipliers = {"k": 1_000, "m": 1_000_000}
+    for suffix, multiplier in multipliers.items():
+        if value.endswith(suffix):
+            return int(float(value[:-1]) * multiplier)
+    try:
+        return int(value.replace(",", ""))
+    except:
+        return 0
+
+def clean_books(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    df["ratings_count"] = df["ratings_count"].apply(clean_ratings_count)
+    df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
+
+    df["author"] = df["author"].fillna("").str.strip()
+    df["author_first"] = df["author"].apply(lambda x: x.split()[0].lower() if x else "")
+    df["source"] = "Goodreads"
+
+    df.drop_duplicates(inplace=True)
+    return df

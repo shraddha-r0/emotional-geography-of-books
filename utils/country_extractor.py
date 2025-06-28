@@ -2,7 +2,6 @@ import pycountry
 import re
 from fuzzywuzzy import process
 from bs4 import BeautifulSoup
-import time
 import random
 from typing import Optional
 import requests
