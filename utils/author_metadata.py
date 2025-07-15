@@ -24,8 +24,8 @@ TIMEOUT = ClientTimeout(total=30)
 # Function to guess gender based on the pronouns used in the author's bio
 def guess_gender(text: str) -> str:
     text = text.lower()
-    she = len(re.findall(r'\bshe\b', text))
-    he  = len(re.findall(r'\bhe\b', text))
+    she = len(re.findall(r'\b(she|her|hers)\b', text, re.IGNORECASE))
+    he  = len(re.findall(r'\b(he|him|his)\b', text, re.IGNORECASE))
     if she > he:   return "female"
     if he  > she:  return "male"
     return "unknown"
@@ -79,6 +79,7 @@ async def fetch_author_meta(author_url: str, session: ClientSession) -> tuple[st
     bio_text = bio_container.get_text(" ", strip=True) if bio_container else ""
     gender = guess_gender(bio_text)
     gender_source = "goodreads" if gender != "unknown" else "unknown"
+    print(author_url, "-", country, "-", gender, "-", gender_source)
     return country, gender, gender_source
 
 
@@ -98,7 +99,7 @@ async def enrich_books_with_authors_async(df: pd.DataFrame) -> pd.DataFrame:
                         author_cache[author_url] = (country, gender, gender_source)
                     return author_cache[author_url]
                 except Exception:
-                    return ("", "unknown", "")
+                    return ("unknown", "unknown", "unknown")
 
         # launch one task per book (author fetches will be de-duplicated by cache)
         tasks = [asyncio.create_task(handle_book(url)) for url in df["link"]]
@@ -112,27 +113,10 @@ async def enrich_books_with_authors_async(df: pd.DataFrame) -> pd.DataFrame:
     out["gender_source"] = gender_sources
     return out
 
-
-def query_namsor(name: str = "") -> dict:
-    headers = {
-        "X-API-KEY": NAMSOR_API_KEY,
-        "Accept": "application/json"    
-    }
-    url = NAMSOR_URL + name
-    resp = requests.get(url, headers=headers)
-    resp.raise_for_status()
-    return resp.json()
-
-def fill_from_namsor(row):
-    if row["author_gender"] == "unknown":
-        meta = namsor_cache.get(row["author"], {"gender": "unknown/non-binary", "confidence": 0})
-        gender = meta["gender"]
-        if gender in ("male", "female"):
-            row["author_gender"] = gender
-            row["gender_source"] = "namsor"
-    else:
-        row["author_gender"] = "unknown/non-binary"
-        row["gender_source"] = "namsor"
+def fill_from_namsor(row, namsor_cache):
+    gender = namsor_cache.get(row["author"], {}).get("gender", "unknown/non-binary")
+    row["author_gender"] = gender
+    row["gender_source"] = "namsor"
 
     # Final fallback to manual map
     manual_map = load_manual_gender_map()
@@ -141,27 +125,34 @@ def fill_from_namsor(row):
         if manual_gender in ("male", "female"):
             row["author_gender"] = manual_gender
             row["gender_source"] = "manual"
-
     return row
 
-def enrich_books_with_authors(df: pd.DataFrame) -> pd.DataFrame:
+#Helper to call NamSor
+def query_namsor(name: str = "") -> dict:
+    """
+    Query NamSor with a first & last name.
+    Returns JSON with keys 'gender', 'probabilityCalibrated', etc.
+    """
+    headers = {
+        "X-API-KEY": NAMSOR_API_KEY,
+        "Accept": "application/json"    
+    }
+    url = NAMSOR_URL + name
+    resp = requests.request("GET", url, headers=headers)
+    resp.raise_for_status()
+    return resp.json()
 
+
+def enrich_books_with_authors(df: pd.DataFrame) -> pd.DataFrame:
     nest_asyncio.apply()
 
     # Read the bio of the authors from goodreads and predict gender
-    #enriched_df = asyncio.run(enrich_books_with_authors_async(df))
-
-    #Test block
-    enriched_df = df.copy()
-    enriched_df["author_country"] = ""
-    enriched_df["author_gender"] = "unknown"
-    enriched_df["gender_source"] = "unknown"
+    enriched_df = asyncio.run(enrich_books_with_authors_async(df))
 
     # NamSor fallback for unknowns
     mask_unknown = enriched_df["author_gender"] == "unknown"
     unknown_authors = (
         enriched_df[mask_unknown]
-        .loc[:, ["author"]]
         .drop_duplicates("author")
         .reset_index(drop=True)
     )
@@ -183,8 +174,10 @@ def enrich_books_with_authors(df: pd.DataFrame) -> pd.DataFrame:
         namsor_cache[name] = {"gender": gender, "confidence": confidence}
         sleep(0.5)
 
-    df_final = enriched_df.apply(fill_from_namsor, axis=1)
-    return df_final
+    unknown_authors = unknown_authors.apply(lambda row: fill_from_namsor(row, namsor_cache), axis=1)
+    #Add gender of unknown_authors back to enriched_df
+    enriched_df = pd.concat([enriched_df[~mask_unknown], unknown_authors], ignore_index=True)
+    return enriched_df
 
 def load_manual_gender_map() -> dict:
     manual_path = Path(__file__).resolve().parents[1] / "data/manual_overrides/gender_manual.csv"
