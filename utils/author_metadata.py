@@ -113,20 +113,6 @@ async def enrich_books_with_authors_async(df: pd.DataFrame) -> pd.DataFrame:
     out["gender_source"] = gender_sources
     return out
 
-def fill_from_namsor(row, namsor_cache):
-    gender = namsor_cache.get(row["author"], {}).get("gender", "unknown/non-binary")
-    row["author_gender"] = gender
-    row["gender_source"] = "namsor"
-
-    # Final fallback to manual map
-    manual_map = load_manual_gender_map()
-    if row["author_gender"] == "unknown/non-binary":
-        manual_gender = manual_map.get(row["author"])
-        if manual_gender in ("male", "female"):
-            row["author_gender"] = manual_gender
-            row["gender_source"] = "manual"
-    return row
-
 #Helper to call NamSor
 def query_namsor(name: str = "") -> dict:
     """
@@ -151,14 +137,13 @@ def enrich_books_with_authors(df: pd.DataFrame) -> pd.DataFrame:
 
     # NamSor fallback for unknowns
     mask_unknown = enriched_df["author_gender"] == "unknown"
-    unknown_authors = (
-        enriched_df[mask_unknown]
-        .drop_duplicates("author")
-        .reset_index(drop=True)
-    )
-
+    unknown_authors = enriched_df[mask_unknown]
+    
+    # Get unique authors for NamSor queries
+    unique_authors = unknown_authors.drop_duplicates("author")
+    
     namsor_cache = {}
-    for _, row in unknown_authors.iterrows():
+    for _, row in unique_authors.iterrows():
         name = row["author"].strip()
         try:
             result = query_namsor(name=name)
@@ -171,12 +156,24 @@ def enrich_books_with_authors(df: pd.DataFrame) -> pd.DataFrame:
         if confidence < 0.85:
             gender = "unknown/non-binary"
 
-        namsor_cache[name] = {"gender": gender, "confidence": confidence}
+        namsor_cache[name] = {
+            "gender": gender, 
+            "confidence": confidence,
+            "source": "namsor"
+        }
         sleep(0.5)
 
-    unknown_authors = unknown_authors.apply(lambda row: fill_from_namsor(row, namsor_cache), axis=1)
-    #Add gender of unknown_authors back to enriched_df
-    enriched_df = pd.concat([enriched_df[~mask_unknown], unknown_authors], ignore_index=True)
+    manual_map = load_manual_gender_map()
+    # Update all books with the cached gender information or manual map
+    for idx, row in unknown_authors.iterrows():
+        author = row['author'].strip()
+        if author in namsor_cache:
+            enriched_df.at[idx, 'author_gender'] = namsor_cache[author]['gender']
+            enriched_df.at[idx, 'gender_source'] = namsor_cache[author]['source']
+        else: 
+            manual_gender = manual_map.get(row["author"])
+            enriched_df.at[idx, 'author_gender'] = manual_gender
+            enriched_df.at[idx, 'gender_source'] = "manual"
     return enriched_df
 
 def load_manual_gender_map() -> dict:
