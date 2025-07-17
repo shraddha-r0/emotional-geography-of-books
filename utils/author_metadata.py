@@ -5,14 +5,13 @@ from time import sleep
 import os
 from aiohttp import ClientSession, ClientTimeout
 import asyncio
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup, NavigableString, Tag
 import re
 from dotenv import load_dotenv
 import requests
+import json
 
 load_dotenv()
-NAMSOR_API_KEY = os.getenv("NAMSOR_API_KEY")
-NAMSOR_URL = "https://v2.namsor.com/NamSorAPIv2/api2/json/genderFull/"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -20,6 +19,23 @@ HEADERS = {
 
 MAX_CONCURRENCY = 5  # Adjust based on your needs
 TIMEOUT = ClientTimeout(total=30)
+
+# Function to query Genderize.io API
+def query_genderize(name: str) -> dict:
+    # Extract first name from full name
+    first_name = name.split()[0] if name else ""
+    url = f"https://api.genderize.io/?name={first_name}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        result = response.json()
+        # Only return gender if probability is high enough
+        if result.get("probability") and float(result["probability"]) > 0.9:
+            return {"gender": result["gender"], "probability": result["probability"]}
+        return {"gender": None, "probability": None}
+    except Exception as e:
+        print(f"Error querying Genderize.io for {name}: {e}")
+        return {"gender": None, "probability": None}
 
 # Function to guess gender based on the pronouns used in the author's bio
 def guess_gender(text: str) -> str:
@@ -30,7 +46,7 @@ def guess_gender(text: str) -> str:
     if he  > she:  return "male"
     return "unknown"
 
-#  Async author‐URL extractor
+# Function to fetch author URL
 async def extract_author_url(book_url: str, session: ClientSession) -> str:
     async with session.get(book_url, headers=HEADERS) as resp:
         resp.raise_for_status()
@@ -49,8 +65,7 @@ async def extract_author_url(book_url: str, session: ClientSession) -> str:
 
     raise RuntimeError("no author link")
 
-
-# Async author‐meta fetcher
+# Function to fetch author meta from Goodreads
 async def fetch_author_meta(author_url: str, session: ClientSession) -> tuple[str, str, str]:
     async with session.get(author_url, headers=HEADERS) as resp:
         resp.raise_for_status()
@@ -77,108 +92,77 @@ async def fetch_author_meta(author_url: str, session: ClientSession) -> tuple[st
     bio_container = soup.select_one("div.aboutAuthorInfo") or \
                     soup.find(id=re.compile(r"freeTextContainerauthor"))
     bio_text = bio_container.get_text(" ", strip=True) if bio_container else ""
+    
+    # Step 1: Try to get gender from Goodreads bio
     gender = guess_gender(bio_text)
     gender_source = "goodreads" if gender != "unknown" else "unknown"
-    print(author_url, "-", country, "-", gender, "-", gender_source)
+    
+    # Step 2: If not found in bio, try Genderize.io
+    if gender == "unknown":
+        name_elem = soup.select_one("span.authorName__container") or soup.select_one("h1.authorName")
+        if name_elem:
+            name = name_elem.get_text(strip=True)
+            genderize_result = query_genderize(name)
+            if genderize_result["gender"]:
+                gender = genderize_result["gender"]
+                gender_source = "genderize.io"
+    
+    # Step 3: If still unknown, try manual mapping
+    if gender == "unknown":
+        manual_map = load_manual_gender_map()
+        print("Manual map:" + str(manual_map))
+        name_elem = soup.select_one("span.authorName__container") or soup.select_one("h1.authorName")
+        if name_elem:
+            name = name_elem.get_text(strip=True)
+            print(name)
+            if name in manual_map:
+                gender = manual_map[name]
+                gender_source = "manual_map"
+    
+    #print(author_url, "-", country, "-", gender, "-", gender_source)
     return country, gender, gender_source
 
-
-# Orchestrator: for each book URL find its author and meta, caching per author
-async def enrich_books_with_authors_async(df: pd.DataFrame) -> pd.DataFrame:
-    sem = asyncio.Semaphore(MAX_CONCURRENCY)
-    author_cache: dict[str, tuple[str,str]] = {}
-
-    async with ClientSession(timeout=TIMEOUT) as session:
-
-        async def handle_book(book_url: str):
-            async with sem:
-                try:
-                    author_url = await extract_author_url(book_url, session)
-                    if author_url not in author_cache:
-                        country, gender, gender_source = await fetch_author_meta(author_url, session)
-                        author_cache[author_url] = (country, gender, gender_source)
-                    return author_cache[author_url]
-                except Exception:
-                    return ("unknown", "unknown", "unknown")
-
-        # launch one task per book (author fetches will be de-duplicated by cache)
-        tasks = [asyncio.create_task(handle_book(url)) for url in df["link"]]
-        results = await asyncio.gather(*tasks)
-
-    # unpack into new columns
-    countries, genders, gender_sources = zip(*results)
-    out = df.copy() 
-    out["author_country"] = countries
-    out["author_gender"] = genders
-    out["gender_source"] = gender_sources
-    return out
-
-#Helper to call NamSor
-def query_namsor(name: str = "") -> dict:
-    """
-    Query NamSor with a first & last name.
-    Returns JSON with keys 'gender', 'probabilityCalibrated', etc.
-    """
-    headers = {
-        "X-API-KEY": NAMSOR_API_KEY,
-        "Accept": "application/json"    
-    }
-    url = NAMSOR_URL + name
-    resp = requests.request("GET", url, headers=headers)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def enrich_books_with_authors(df: pd.DataFrame) -> pd.DataFrame:
-    nest_asyncio.apply()
-
-    # Read the bio of the authors from goodreads and predict gender
-    enriched_df = asyncio.run(enrich_books_with_authors_async(df))
-
-    # NamSor fallback for unknowns
-    mask_unknown = enriched_df["author_gender"] == "unknown"
-    unknown_authors = enriched_df[mask_unknown]
-    
-    # Get unique authors for NamSor queries
-    unique_authors = unknown_authors.drop_duplicates("author")
-    
-    namsor_cache = {}
-    for _, row in unique_authors.iterrows():
-        name = row["author"].strip()
-        try:
-            result = query_namsor(name=name)
-            gender = result.get("likelyGender", "unknown")
-            confidence = result.get("probabilityCalibrated", 0.0)
-        except Exception as e:
-            print(f"⚠️ NamSor failed for {name!r}: {e}")
-            gender, confidence = "unknown", 0.0
-
-        if confidence < 0.85:
-            gender = "unknown/non-binary"
-
-        namsor_cache[name] = {
-            "gender": gender, 
-            "confidence": confidence,
-            "source": "namsor"
-        }
-        sleep(0.5)
-
-    manual_map = load_manual_gender_map()
-    # Update all books with the cached gender information or manual map
-    for idx, row in unknown_authors.iterrows():
-        author = row['author'].strip()
-        if author in namsor_cache:
-            enriched_df.at[idx, 'author_gender'] = namsor_cache[author]['gender']
-            enriched_df.at[idx, 'gender_source'] = namsor_cache[author]['source']
-        else: 
-            manual_gender = manual_map.get(row["author"])
-            enriched_df.at[idx, 'author_gender'] = manual_gender
-            enriched_df.at[idx, 'gender_source'] = "manual"
-    return enriched_df
-
+# Function to load manual gender mapping
 def load_manual_gender_map() -> dict:
     manual_path = Path(__file__).resolve().parents[1] / "data/manual_overrides/gender_manual.csv"
     if manual_path.exists():
         df = pd.read_csv(manual_path)
         return dict(zip(df["author"], df["author_gender"]))
     return {}
+
+# Main function to enrich books with author metadata
+async def enrich_books_with_authors(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    countries, genders, gender_sources = [], [], []
+    
+    async with ClientSession(timeout=TIMEOUT) as session:
+        # Process each book URL
+        for url in df["link"]:
+            try:
+                # Extract author URL
+                author_url = await extract_author_url(url, session)
+                
+                # Fetch author metadata
+                country, gender, gender_source = await fetch_author_meta(author_url, session)
+                
+                countries.append(country)
+                genders.append(gender)
+                gender_sources.append(gender_source)
+                
+            except Exception as e:
+                print(f"Error processing {url}: {e}")
+                countries.append("unknown")
+                genders.append("unknown")
+                gender_sources.append("unknown")
+    
+    # Add new columns to the DataFrame
+    out["author_country"] = countries
+    out["author_gender"] = genders
+    out["gender_source"] = gender_sources
+    return out
+
+# Function to run the async enrichment process
+def run_enrichment(df: pd.DataFrame) -> pd.DataFrame:
+    """Wrapper function to run the async enrichment process"""
+    nest_asyncio.apply()
+    return asyncio.run(enrich_books_with_authors(df))
