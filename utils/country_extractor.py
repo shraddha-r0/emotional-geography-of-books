@@ -7,71 +7,71 @@ from text using spaCy's Named Entity Recognition (NER) and additional heuristics
 
 import spacy
 import pandas as pd
-from typing import List, Dict, Optional, Tuple
+import re
+from typing import Dict, Optional, Pattern, Set, Any
 import pycountry
 from tqdm import tqdm
-
-# Load spaCy model (medium model for better accuracy with locations)
-try:
-    nlp = spacy.load("en_core_web_md")
-except OSError:
-    # If the model is not found, download it
-    import subprocess
-    import sys
-    subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_md"])
-    nlp = spacy.load("en_core_web_md")
+from functools import lru_cache
 
 # Cache for country name lookups
-country_name_cache = {}
+country_name_cache: Dict[str, str] = {}
 
+# Pre-compile regex patterns for common country name variations
+COUNTRY_PATTERNS = {
+    r'\busa\b|\bus\b|\bu\.s\.\b|\bu\.s\.a\.\b|\bamerica\b': 'United States',
+    r'\buk\b|\bu\.k\.\b|\bbritain\b|\bgreat britain\b|\bengland\b|\bscotland\b|\bwales\b|\bnorthern ireland\b': 'United Kingdom',
+    r'\bsouth korea\b': 'South Korea',
+    r'\bnorth korea\b': 'North Korea',
+    r'\brussia\b': 'Russian Federation',
+    r'\bvietnam\b': 'Viet Nam',
+    r'\bczech republic\b': 'Czechia',
+    r'\bburma\b': 'Myanmar',
+    r'\bdrc\b|\bdr congo\b': 'Democratic Republic of the Congo',
+    r'\btanzania\b': 'United Republic of Tanzania',
+    r'\bivory coast\b': "Côte d'Ivoire",
+    r'\bholland\b': 'Netherlands',
+}
+
+# Compile all patterns once
+COMPILED_PATTERNS = [(re.compile(pattern, re.IGNORECASE), country) 
+                     for pattern, country in COUNTRY_PATTERNS.items()]
+
+# Lazy loading of spaCy model
+_nlp = None
+
+def get_nlp():
+    """Lazily load the spaCy model only when needed."""
+    global _nlp
+    if _nlp is None:
+        try:
+            _nlp = spacy.load("en_core_web_sm")  # Using small model for speed
+        except OSError:
+            import subprocess
+            import sys
+            print("Downloading spaCy model (this will only happen once)...")
+            subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"], 
+                         check=True)
+            _nlp = spacy.load("en_core_web_sm")
+    return _nlp
 
 def load_country_mappings() -> Dict[str, str]:
     """
     Load a comprehensive mapping of country names and variations to standardized names.
-    
-    Returns:
-        Dictionary mapping country names/variations to standardized names
     """
-    mappings = {
-        'usa': 'United States',
-        'us': 'United States',
-        'u.s.': 'United States',
-        'u.s.a.': 'United States',
-        'america': 'United States',
-        'united states of america': 'United States',
-        'uk': 'United Kingdom',
-        'u.k.': 'United Kingdom',
-        'britain': 'United Kingdom',
-        'great britain': 'United Kingdom',
-        'england': 'United Kingdom',
-        'scotland': 'United Kingdom',
-        'wales': 'United Kingdom',
-        'northern ireland': 'United Kingdom',
-        'republic of ireland': 'Ireland',
-        'south korea': 'South Korea',
-        'north korea': 'North Korea',
-        'russia': 'Russian Federation',
-        'vietnam': 'Viet Nam',
-        'czech republic': 'Czechia',
-        'burma': 'Myanmar',
-        'congo': 'Congo',
-        'drc': 'Democratic Republic of the Congo',
-        'dr congo': 'Democratic Republic of the Congo',
-        'tanzania': 'United Republic of Tanzania',
-        'ivory coast': "Côte d'Ivoire",
-        'holland': 'Netherlands',
-    }
+    mappings = {}
+    
+    # Add country patterns
+    for pattern, country in COUNTRY_PATTERNS.items():
+        mappings[country.lower()] = country
     
     # Add official country names and common variations
     for country in pycountry.countries:
         name = country.name.lower()
         mappings[name] = country.name
         
-        # Add common name if different from official name
         if hasattr(country, 'common_name'):
             mappings[country.common_name.lower()] = country.name
             
-        # Add official name variations
         if hasattr(country, 'official_name'):
             mappings[country.official_name.lower()] = country.name
     
@@ -80,93 +80,66 @@ def load_country_mappings() -> Dict[str, str]:
 # Load country mappings
 COUNTRY_MAPPINGS = load_country_mappings()
 
-
 def standardize_country_name(country_name: str) -> Optional[str]:
-    """
-    Standardize country name to a canonical form.
-    
-    Args:
-        country_name: Input country name to standardize
-        
-    Returns:
-        Standardized country name or None if not a valid country
-    """
+    """Standardize country name to a canonical form."""
     if not country_name:
         return None
         
-    # Check cache first
     normalized = country_name.lower().strip()
-    if normalized in country_name_cache:
-        return country_name_cache[normalized]
     
-    # Check against our mapping
+    # Check against our mapping first (fast path)
     if normalized in COUNTRY_MAPPINGS:
-        country_name_cache[normalized] = COUNTRY_MAPPINGS[normalized]
         return COUNTRY_MAPPINGS[normalized]
     
-    # Try to find a close match
-    for key, value in COUNTRY_MAPPINGS.items():
-        if country_name.lower() in key or key in country_name.lower():
-            country_name_cache[normalized] = value
-            return value
+    # Try patterns for common variations
+    for pattern, country in COMPILED_PATTERNS:
+        if pattern.search(normalized):
+            return country
+    
+    # Check for substrings in country names (slower path)
+    for name, std_name in COUNTRY_MAPPINGS.items():
+        if normalized in name or name in normalized:
+            return std_name
     
     return None
-
 
 def extract_country_from_text(text: str) -> Optional[str]:
-    """
-    Extract country from text using spaCy NER and additional heuristics.
-    
-    Args:
-        text: Input text to extract country from
-        
-    Returns:
-        Standardized country name or None if no country found
-    """
-    if not text or pd.isna(text) or str(text).lower() in ['unknown', 'nan', 'none', '']:
+    """Extract country from text using optimized matching and spaCy NER as fallback."""
+    if not text or pd.isna(text) or str(text).lower() in {'unknown', 'nan', 'none', ''}:
         return None
     
-    # First try to find exact matches in our mappings
-    text_lower = str(text).lower()
-    for country_variant, standard_name in COUNTRY_MAPPINGS.items():
-        if country_variant in text_lower:
-            return standard_name
+    text_str = str(text).lower()
     
-    # If no exact match, use spaCy NER
-    doc = nlp(str(text))
+    # First try direct lookup (fastest)
+    if text_str in COUNTRY_MAPPINGS:
+        return COUNTRY_MAPPINGS[text_str]
     
-    # Look for GPE (Geopolitical Entity) entities
-    for ent in doc.ents:
-        if ent.label_ in ['GPE', 'LOC', 'NORP']:
-            standardized = standardize_country_name(ent.text)
-            if standardized:
-                return standardized
+    # Try patterns (fast)
+    for pattern, country in COMPILED_PATTERNS:
+        if pattern.search(text_str):
+            return country
     
-    # If no GPE found, check for country names in the text
-    for token in doc:
-        standardized = standardize_country_name(token.text)
-        if standardized:
-            return standardized
+    # Only use spaCy if no match found (slow)
+    try:
+        doc = get_nlp()(text_str)
+        
+        # Look for GPE (Geopolitical Entity) entities
+        for ent in doc.ents:
+            if ent.label_ in {'GPE', 'LOC', 'NORP'} and len(ent.text) > 2:
+                standardized = standardize_country_name(ent.text)
+                if standardized:
+                    return standardized
+    except Exception as e:
+        print(f"Error processing text with spaCy: {e}")
     
     return None
-
 
 def extract_countries_from_dataframe(
     df: pd.DataFrame, 
     text_column: str = 'author_country',
     output_column: str = 'extracted_country'
 ) -> pd.DataFrame:
-    """
-    Extract countries from a DataFrame column containing location text.
-    
-    Args:
-        df: Input DataFrame
-        text_column: Name of the column containing location text
-        output_column: Name of the column to store extracted countries
-        
-    Returns:
-        DataFrame with an additional column containing extracted countries
-    """
+    """Extract countries from a DataFrame column containing location text."""
     # Make a copy to avoid modifying the original
     result_df = df.copy()
     
@@ -188,39 +161,19 @@ def extract_countries_from_dataframe(
     
     return result_df
 
-
 def analyze_country_distribution(df: pd.DataFrame, country_column: str = 'extracted_country') -> None:
-    """
-    Print a summary of country distribution in the DataFrame.
-    
-    Args:
-        df: Input DataFrame
-        country_column: Name of the column containing country information
-    """
+    """Print a summary of country distribution in the DataFrame."""
     if country_column not in df.columns:
         print(f"Error: Column '{country_column}' not found in DataFrame")
         return
     
     print("\nCountry Distribution:")
-    print("=" * 50)
-    
-    # Count countries
-    country_counts = df[country_column].value_counts(dropna=False)
-    
-    # Print top countries
-    print("\nTop 20 Countries:")
+    country_counts = df[country_column].value_counts()
     print(country_counts.head(20))
     
-    # Print summary stats
-    print(f"\nTotal unique countries: {len(country_counts) - (1 if 'Unknown' in country_counts else 0)}")
-    unknown_count = country_counts.get('Unknown', 0) + country_counts.get(None, 0)
-    print(f"Unknown countries: {unknown_count} ({unknown_count/len(df)*100:.1f}%)")
-    
-    # Print countries with only one occurrence
     single_occurrence = country_counts[country_counts == 1].index.tolist()
     if single_occurrence:
         print(f"\nCountries with only one occurrence: {', '.join(map(str, single_occurrence))}")
-
 
 # Example usage
 if __name__ == "__main__":

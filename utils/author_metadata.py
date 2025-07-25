@@ -80,7 +80,7 @@ async def rate_limit():
     
     if time_since_last < GOODREADS_REQUEST_DELAY:
         sleep_time = GOODREADS_REQUEST_DELAY - time_since_last
-        print(f"[RATE LIMIT] Waiting {sleep_time:.1f}s before next request...")
+        #print(f"[RATE LIMIT] Waiting {sleep_time:.1f}s before next request...")
         await asyncio.sleep(sleep_time)
     
     last_request_time = time.time()
